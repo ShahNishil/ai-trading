@@ -1,0 +1,77 @@
+# AI Trading System Configuration
+# ================================
+
+dhan:
+  trading_mode: paper  # paper | live
+  ip_address: ""       # Set your IP for Dhan API access
+
+groq:
+  model: "openai/gpt-oss-20b"  # Free Groq model (was llama-3.3-70b-versatile — decommissioned 2025)
+  temperature: 0.1     # Low temperature for consistent analysis
+  max_tokens: 2048
+
+# AI Triggers Settings
+triggers:
+  watchlist: "NIFTY50"          # NIFTY50 | NIFTYBANK | BANKNIFTY | custom
+  custom_symbols: []            # Used when watchlist=custom
+  confidence_threshold: 0.50    # Minimum confidence to show trigger (lowered from 0.65 for more results)
+  analysis_timeframe: "daily"   # daily | 60min | 15min
+  lookback_days: 200            # Days of historical data for analysis
+
+# Auto Trading Settings
+auto_trade:
+  enabled: false                # Master switch
+  max_positions: 5              # Max concurrent open positions
+  risk_per_trade_pct: 2.0       # % of capital risked per trade
+  max_daily_loss_pct: 5.0       # Auto-halt if daily loss exceeds this
+  min_confidence: 0.70          # Minimum AI confidence to execute trade
+  scan_interval_seconds: 300    # How often to scan (5 min default)
+  stop_loss_pct: 2.0            # Default stop-loss percentage
+  target_pct: 4.0               # Default target percentage
+  trailing_stop_pct: 1.5        # Trailing stop activation percentage
+  product_type: "INTR"          # INTR | CNC | MTF
+  order_type: "LIMIT"           # LIMIT | MARKET
+
+# Backtesting Settings
+backtest:
+  initial_capital: 100000       # Starting capital in INR
+  default_timeframe: "daily"    # daily | 60min | 15min | 5min | 1min
+  commission_pct: 0.03          # Brokerage percentage
+  slippage_pct: 0.05            # Slippage percentage
+  default_strategy: "momentum"  # momentum | mean_reversion | breakout | ai
+
+# Watchlists
+watchlists:
+  NIFTY50:
+    - { symbol: "RELIANCE", security_id: "1602", exchange: "NSE_EQ" }
+    - { symbol: "TCS", security_id: "11536", exchange: "NSE_EQ" }
+    - { symbol: "HDFCBANK", security_id: "1333", exchange: "NSE_EQ" }
+    - { symbol: "INFY", security_id: "1594", exchange: "NSE_EQ" }
+    - { symbol: "ICICIBANK", security_id: "1270", exchange: "NSE_EQ" }
+    - { symbol: "HINDUNILVR", security_id: "1394", exchange: "NSE_EQ" }
+    - { symbol: "ITC", security_id: "1102", exchange: "NSE_EQ" }
+    - { symbol: "SBIN", security_id: "3045", exchange: "NSE_EQ" }
+    - { symbol: "BHARTIARTL", security_id: "1069", exchange: "NSE_EQ" }
+    - { symbol: "KOTAKBANK", security_id: "1923", exchange: "NSE_EQ" }
+    - { symbol: "LT", security_id: "1786", exchange: "NSE_EQ" }
+    - { symbol: "AXISBANK", security_id: "590", exchange: "NSE_EQ" }
+    - { symbol: "ASIANPAINT", security_id: "534", exchange: "NSE_EQ" }
+    - { symbol: "MARUTI", security_id: "1838", exchange: "NSE_EQ" }
+    - { symbol: "SUNPHARMA", security_id: "3351", exchange: "NSE_EQ" }
+    - { symbol: "TATAMOTORS", security_id: "3412", exchange: "NSE_EQ" }
+    - { symbol: "WIPRO", security_id: "3787", exchange: "NSE_EQ" }
+    - { symbol: "ULTRACEMCO", security_id: "3506", exchange: "NSE_EQ" }
+    - { symbol: "TITAN", security_id: "3514", exchange: "NSE_EQ" }
+    - { symbol: "BAJFINANCE", security_id: "623", exchange: "NSE_EQ" }
+
+  NIFTYBANK:
+    - { symbol: "HDFCBANK", security_id: "1333", exchange: "NSE_EQ" }
+    - { symbol: "ICICIBANK", security_id: "1270", exchange: "NSE_EQ" }
+    - { symbol: "SBIN", security_id: "3045", exchange: "NSE_EQ" }
+    - { symbol: "KOTAKBANK", security_id: "1923", exchange: "NSE_EQ" }
+    - { symbol: "AXISBANK", security_id: "590", exchange: "NSE_EQ" }
+    - { symbol: "INDUSINDBK", security_id: "1480", exchange: "NSE_EQ" }
+    - { symbol: "BANDHANBNK", security_id: "2175", exchange: "NSE_EQ" }
+    - { symbol: "FEDERALBNK", security_id: "1209", exchange: "NSE_EQ" }
+    - { symbol: "AUBANK", security_id: "4299", exchange: "NSE_EQ" }
+    - { symbol: "IDFCFIRSTB", security_id: "11068", exchange: "NSE_EQ" }

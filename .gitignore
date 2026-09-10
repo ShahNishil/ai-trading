@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.db
+data/market_cache.db
+data/*.parquet
+.venv/
+venv/
+.streamlit/secrets.toml
+*.log

@@ -28,11 +28,67 @@ class DataFetcher:
         return self._yfinance_available
 
     def _to_yahoo_symbol(self, symbol: str) -> str:
-        # NSE symbols need .NS suffix for yfinance
         s = symbol.upper().strip()
+        # Index symbols like ^NSEI / ^NSEBANK are already valid Yahoo tickers
+        if s.startswith("^"):
+            return s
+        # NSE symbols need .NS suffix for yfinance
         if s.endswith(".NS") or s.endswith(".BO"):
             return s
         return f"{s}.NS"
+
+    def fetch_derivative_history(
+        self,
+        instrument,
+        days: int = 60,
+        use_cache: bool = True,
+        timeframe: str = "daily",
+    ) -> pd.DataFrame:
+        """Fetch historical candles for an F&O contract from Dhan.
+
+        `instrument` is a `DerivativeInstrument`. Requires Dhan credentials;
+        raises a clear error otherwise (no public data source for NSE F&O
+        contracts). Synthetic instruments (security_id == "") raise too.
+
+        Returns a DataFrame with columns open/high/low/close/volume and a
+        datetime (tz-naive) index.
+        """
+        if instrument is None:
+            raise ValueError("A DerivativeInstrument is required")
+        if getattr(instrument, "synthetic", False) or not getattr(instrument, "security_id", ""):
+            raise ValueError(
+                f"No tradable contract for {instrument.label()} (synthetic instrument). "
+                "Connect Dhan credentials to fetch real derivative candles."
+            )
+        if self.dhan is None:
+            raise ValueError(
+                "Dhan not configured — real F&O contract history is not available. "
+                "Set DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN in .env. "
+                "Option-strategy backtesting still works via Black-Scholes on underlying data."
+            )
+
+        cache_key = instrument.key()
+        if use_cache and self._is_cache_valid(cache_key, timeframe, min_rows=30):
+            cached = self.cache.get_candles(cache_key, timeframe)
+            if not cached.empty:
+                return cached
+
+        exchange_segment = getattr(instrument, "exchange_segment", "NSE_FNO")
+        instrument_type = instrument.instrument_type
+        from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        to_date = datetime.now().strftime("%Y-%m-%d")
+        response = self.dhan.get_historical_daily(
+            security_id=instrument.security_id,
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
+            from_date=from_date,
+            to_date=to_date,
+            expiry_code=getattr(instrument, "expiry_code_ref", 1) or 0,
+        )
+        df = self._to_dataframe(response)
+        if df is not None and not df.empty:
+            self.cache.save_candles(cache_key, timeframe, df.reset_index())
+        return df if df is not None else pd.DataFrame()
 
     def _fetch_yahoo(self, symbol: str, days: int, interval: str = "1d") -> pd.DataFrame:
         """Fetch from Yahoo Finance as fallback when Dhan not configured."""

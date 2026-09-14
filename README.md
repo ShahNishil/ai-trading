@@ -18,6 +18,7 @@
 - [The 3 Features in Detail](#the-3-features-in-detail)
 - [Technical Indicators](#technical-indicators)
 - [Strategies & Backtesting](#strategies--backtesting)
+- [Derivatives (F&O)](#derivatives-fo)
 - [Risk Management](#risk-management)
 - [Data & Caching](#data--caching)
 - [API References](#api-references)
@@ -51,6 +52,13 @@
 - Charts: equity curve, drawdown, price with trade markers, monthly returns — via Plotly.
 - Grid-search optimizer + AI strategy generator (`agents/strategy_agent.py`).
 
+### 4. Derivatives (F&O) — `Futures & Options, pro-style`
+- **Universe**: full Dhan F&O scrip master (79k+ contracts) — index & stock futures/options with real lot sizes, strike steps, expiries and security IDs; built-in fallback table for offline use.
+- **Option backtesting**: Black-Scholes priced strategies (straddle, strangle, verticals, iron condor) on the underlying spot series — works even without Dhan via Yahoo Finance.
+- **Futures backtesting**: whole-lot, margin-aware (`margin_pct`, `margin_usage_pct`) trend-following on futures.
+- **Execution layer**: F&O-friendly orders (`exchange_segment`, `instrument_type`) for paper/live, option-structure multi-leg entries, risk sizing in lots.
+- Dedicated UI page (`ui/pages/4_derivatives.py`): universe explorer, option chain viewer, payoff simulator.
+
 ---
 
 ## Architecture
@@ -58,7 +66,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Streamlit UI (ui/)                       │
-│   app.py (home)  │  1_ai_triggers.py  │  2_auto_trade.py  │  3_backtest.py  │
+│   app.py (home)  │  1_ai_triggers.py  │  2_auto_trade.py  │  3_backtest.py  │  4_derivatives.py  │
 └──────────────┬──────────────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────────────┐
@@ -97,19 +105,23 @@ ai-trading/
 │   ├── strategy_agent.py # AI strategy generator for backtesting
 │   └── prompts.py        # System prompts (analyst / portfolio manager / designer)
 ├── backtest/
-│   ├── engine.py         # Bar-by-bar simulator + metrics (compute_metrics)
-│   ├── runner.py         # Ties data fetch + strategy + persistence
+│   ├── engine.py         # Bar-by-bar simulator + metrics (compute_metrics); futures lot/margin mode
+│   ├── derivatives.py    # Option (Black-Scholes) + futures backtest engines
+│   ├── runner.py         # Ties data fetch + strategy + persistence (run_derivative for F&O)
 │   └── visualizer.py     # Plotly equity / drawdown / trade charts
 ├── core/
 │   ├── dhan_client.py    # Wrapper over dhanhq SDK (orders, quotes, historical)
-│   ├── ai_engine.py      # Groq client (OpenAI-compatible) + JSON parsing
+│   ├── ai_engine.py      # Groq/OpenAI-compatible client + JSON parsing
 │   ├── indicators.py     # 54 indicators — pure numpy/pandas, no numba
+│   ├── options.py        # Black-Scholes pricing, Greeks, implied vol, realised vol
 │   ├── signals.py        # Rule-based SignalGenerator (momentum/MR/breakout scores)
 │   └── risk_manager.py   # Position sizing, SL/target, trailing, daily-loss halt
 ├── data/
-│   ├── fetcher.py        # Historical (daily/intraday) + quote fetch with cache
+│   ├── fetcher.py        # Historical (daily/intraday/derivative) + quote fetch with cache
 │   ├── cache.py          # SQLite: candles, orders, trades, signals, backtests
 │   ├── universe.py       # Watchlist resolver (NIFTY50, NIFTYBANK, custom)
+│   ├── derivatives.py    # F&O instrument model + universe (Dhan scrip-master CSV)
+│   ├── scrip_master_fno.csv  # Cached F&O contract master (gitignored)
 │   └── market_cache.db   # Created on first run (gitignored)
 ├── strategies/
 │   ├── base.py           # Abstract BaseStrategy
@@ -117,6 +129,7 @@ ai-trading/
 │   ├── mean_reversion.py # RSI + Bollinger
 │   ├── breakout.py       # Donchian + SuperTrend + volume
 │   ├── ai_strategy.py    # LLM rule-based with momentum fallback
+│   ├── derivatives.py    # Option structures (straddle/strangle/spreads/condor) + futures_trend
 │   └── registry.py       # Strategy registry + factory
 ├── trading/
 │   ├── engine.py         # Unified TradingEngine (paper/live)
@@ -128,7 +141,8 @@ ai-trading/
 │   └── pages/
 │       ├── 1_ai_triggers.py
 │       ├── 2_auto_trade.py
-│       └── 3_backtest.py
+│       ├── 3_backtest.py
+│       └── 4_derivatives.py
 ├── config.yaml           # Central configuration (watchlists, risk, backtest)
 ├── requirements.txt      # Python dependencies
 ├── .env.example          # Template for API keys
@@ -249,6 +263,7 @@ Open http://localhost:8501 in your browser. Use the sidebar to navigate:
 
 - **AI Triggers** → pick watchlist + timeframe → **Analyze Watchlist**
 - **Backtesting** → pick symbol + strategy + params → **Run Backtest**
+- **Derivatives** → explore the F&O universe, view option chains, run option/futures backtests and a payoff simulator
 - **Auto Trading** → set risk → choose `paper`/`live` → **Start Auto Trader**
 
 ### 7. Deactivate venv when done
@@ -282,7 +297,7 @@ dhan:
   ip_address: ""               # optional IP for Dhan
 
 groq:
-  model: "llama-3.3-70b-versatile"
+  model: "openai/gpt-oss-20b"  # verified free tier (llama-3.3-70b-versatile was decommissioned)
   temperature: 0.1
   max_tokens: 2048
 
@@ -312,6 +327,19 @@ backtest:
   commission_pct: 0.03
   slippage_pct: 0.05
   default_strategy: "momentum"
+
+derivatives:
+  default_underlying: "NIFTY"   # NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | any stock F&O
+  market: "IDX"                 # IDX (index F&O) | STK (stock F&O)
+  default_strategy: "long_straddle"
+  iv_pct: 0.0                   # 0 = realised vol from underlying data (annualised % otherwise)
+  risk_free_rate_pct: 7.0
+  entry_days_before_expiry: 5   # enter option structures N days before expiry
+  risk_per_trade_pct: 0.75      # % of capital risked per option structure
+  max_lots_per_trade: 5
+  futures_margin_pct: 12.0      # futures margin as % of notional
+  futures_margin_usage_pct: 60.0
+  product_type: "INTR"          # INTR | CNC | MTF (F&O order product type)
 
 watchlists:
   NIFTY50: [...]
@@ -389,6 +417,30 @@ deactivate
 5. Trade table + backtest history persisted to SQLite (`backtests` table).
 6. **Generate AI Strategy** → `StrategyAgent.generate()` asks LLM to design a strategy (entry/exit/SL/TP rules + indicators + params) → convert to `AIStrategy` params → **Backtest AI Strategy**.
 
+### Feature 4 — Derivatives (F&O) (`ui/pages/4_derivatives.py` + `backtest/derivatives.py`)
+
+1. **Universe tab** — shows the Dhan F&O scrip master status, underlyings, expiries/lot sizes/strike steps and nearest resolvable futures/option contract (with real security IDs when the master is available).
+2. **Option Chain tab** — picks an expiry and shows the ATM-anchored chain (CE/PE security IDs, lot sizes). Falls back to a synthetic chain when the master isn't available.
+3. **Option Backtest** — strategies are entered N days before expiry, priced and mark-to-market **bar-by-bar with Black-Scholes** using realised volatility of the underlying spot (or a fixed `iv_pct`). Fills are sequential (no overlapping structures); exits on target/stop/expiry settlement. Underlyings resolve through `DerivativeUniverse.spot_symbol()` (e.g. `^NSEI`, `^NSEBANK`) so backtests run even without Dhan.
+4. **Futures Backtest** — `futures_trend` (momentum on the futures/spot series) with whole-lot, margin-aware sizing (`margin_pct` of notional, `margin_usage_pct` cap).
+5. **Payoff Simulator** — builds the selected structure's legs, prices them with BS, and plots P&L at expiry with breakevens, max profit/loss.
+6. Built-in option structures: `long_straddle`, `long_strangle`, `bull_call_spread`, `bear_put_spread`, `iron_condor`. Futures: `futures_trend`.
+7. **Live F&O trading** — `place_order()` takes `exchange_segment` (e.g. `NSE_FNO`) + `instrument_type` (OPTIDX/OPTSTK/FUTIDX/FUTSTK); `enter_option_structure()`/`enter_futures_position()` in `TradingEngine` place multi-leg paper/live entries; risk sizing supports `option_lots_quantity` / `futures_margin_quantity`. Real contract history + live orders need Dhan credentials in `.env`.
+
+---
+
+## Derivatives (F&O) Reference
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| **F&O universe** | `data/derivatives.py` | Parses the public Dhan scrip-master CSV (`https://images.dhan.co/api-data/api-scrip-master.csv`), caches to `data/scrip_master_fno.csv`, resolves underlyings/expiries/lot sizes/strike steps/contracts. |
+| **Option pricing** | `core/options.py` | Black-Scholes `bs_price`, `bs_greeks`, `implied_vol` (Newton), `annualized_volatility`, `intrinsic_value`, `settle_intrinsic`. |
+| **Derivative backtests** | `backtest/derivatives.py` | `DerivativeBacktestEngine.run_options` (BS mark-to-market, sequential expiry cycles) and `run_futures` (margin-aware). |
+| **Derivative strategies** | `strategies/derivatives.py` | Multi-leg structures + `futures_trend`; `list_derivative_strategies()`, `create_derivative_strategy()`, `payoff_table()`. |
+| **F&O data fetch** | `data/fetcher.py` | `fetch_derivative_history()` via Dhan for real contract candles; spot underlyings via Yahoo (`^NSEI`, `^NSEBANK`, `.NS`). |
+
+**Why Black-Scholes?** Option backtests work with nothing but the underlying spot series, so strategies can be validated without a broker — pricing quality is the classic European-model approximation, appropriate for benchmarking multi-leg structures.
+
 ---
 
 ## Technical Indicators
@@ -420,6 +472,8 @@ All in `core/indicators.py` — pure `pandas`/`numpy`:
 | **Mean Reversion** | `strategies/mean_reversion.py` | RSI oversold/overbought at Bollinger bands |
 | **Breakout** | `strategies/breakout.py` | Donchian channel break + SuperTrend + volume expansion |
 | **AI** | `strategies/ai_strategy.py` | LLM-generated rules (entry/exit/SL/TP) with momentum fallback |
+| **Futures Trend** | `strategies/derivatives.py` | Momentum on futures/underlying, whole-lot margin backtest |
+| **Option structures** | `strategies/derivatives.py` | `long_straddle` · `long_strangle` · `bull_call_spread` · `bear_put_spread` · `iron_condor` — Black-Scholes backtested |
 
 Add a new strategy:
 

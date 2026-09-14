@@ -5,6 +5,7 @@ class RiskManager:
     """Position sizing and portfolio risk guardrails for auto-trading."""
 
     def __init__(self, config: dict, portfolio=None):
+        self.config = config
         at = config.get("auto_trade", {})
         self.max_positions = int(at.get("max_positions", 5))
         self.risk_per_trade_pct = float(at.get("risk_per_trade_pct", 2.0))
@@ -46,6 +47,50 @@ class RiskManager:
         # Cap so that notional is not absurdly larger than capital
         max_qty = int(capital / entry_price)
         return max(1, min(qty, max_qty))
+
+    # ------------------------------------------------------------------
+    # Derivatives sizing
+    # ------------------------------------------------------------------
+    def option_lots_quantity(
+        self,
+        capital: float,
+        premium_per_unit: float,
+        lot_size: int = 1,
+        risk_per_trade_pct: float = None,
+        max_lots: int = 10,
+    ) -> int:
+        """Number of lots for an option structure so max premium risk <= budget.
+
+        ``premium_per_unit`` is the net debit per underlying unit (negative for
+        credit structures). For credits we still cap using the premium value.
+        """
+        risk_pct = risk_per_trade_pct or float(self.config.get("derivatives", {}).get("risk_per_trade_pct", 0.75))
+        risk_amount = capital * (risk_pct / 100.0)
+        lot_size = max(int(lot_size or 1), 1)
+        abs_prem = abs(float(premium_per_unit or 0.0))
+        allowed = max_lots or int(self.config.get("derivatives", {}).get("max_lots_per_trade", 10))
+        if abs_prem <= 0:
+            return 1
+        lots = int(risk_amount / (abs_prem * lot_size)) or 1
+        return max(1, min(lots, allowed))
+
+    def futures_margin_quantity(
+        self,
+        capital: float,
+        futures_price: float,
+        lot_size: int = 1,
+        margin_pct: float = 12.0,
+        usage_pct: float = 60.0,
+    ) -> int:
+        """Lot units affordable within the margin usage budget."""
+        lot_size = max(int(lot_size or 1), 1)
+        if futures_price <= 0:
+            return lot_size
+        margin_per_lot = futures_price * lot_size * (margin_pct / 100.0)
+        if margin_per_lot <= 0:
+            return lot_size
+        alloc = capital * (usage_pct / 100.0)
+        return max(lot_size, int(alloc / margin_per_lot) * lot_size)
 
     def compute_stop_loss(self, entry_price: float, entry_date, volatility_factor: float = 1.0) -> float:
         return round(entry_price * (1 - self.stop_loss_pct * volatility_factor / 100.0), 2)

@@ -28,8 +28,15 @@ class OrderManager:
         strategy: str = "auto_ai",
         security_id: str = "",
         tag: str = "ai_trading",
+        exchange_segment: str = None,
+        instrument_type: str = "EQUITY",
     ) -> dict:
-        """Place an order. Returns order dict with order_id."""
+        """Place an order. Returns order dict with order_id.
+
+        ``exchange_segment`` defaults to the equity segment; derivatives callers
+        pass ``NSE_FNO`` (index/stock futures & options).
+        """
+        exchange_segment = exchange_segment or self.exchange_segment
         order_id = str(uuid.uuid4())[:12]
         order = {
             "order_id": order_id,
@@ -44,6 +51,8 @@ class OrderManager:
             "product_type": product_type,
             "created_at": datetime.now().isoformat(),
             "mode": self.mode,
+            "exchange_segment": exchange_segment,
+            "instrument_type": instrument_type,
         }
 
         if self.mode == "live" and self.dhan is not None and security_id:
@@ -52,7 +61,7 @@ class OrderManager:
                 ot = "MARKET" if order_type.upper() == "MARKET" else "LIMIT"
                 resp = self.dhan.place_order(
                     security_id=security_id,
-                    exchange_segment=self.exchange_segment,
+                    exchange_segment=exchange_segment,
                     transaction_type=txn_type,
                     quantity=quantity,
                     order_type=ot,

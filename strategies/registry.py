@@ -48,6 +48,7 @@ def list_strategies() -> list:
             "name": cls.name,
             "description": cls.description,
             "default_params": cls.default_params,
+            "market": getattr(cls, "market", "cash"),
         }
         for cls in _registry.values()
     ]

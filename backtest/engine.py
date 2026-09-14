@@ -32,14 +32,22 @@ class BacktestEngine:
         initial_capital: float = 100000,
         commission_pct: float = 0.03,
         slippage_pct: float = 0.05,
+        lot_size: int = 0,
+        margin_pct: float = 12.0,
+        margin_usage_pct: float = 60.0,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.commission_pct = commission_pct / 100.0
         self.slippage_pct = slippage_pct / 100.0
+        # Futures lot sizing / margin mode (lot_size > 0 activates it)
+        self.lot_size = lot_size
+        self.margin_pct = margin_pct / 100.0
+        self.margin_usage_pct = margin_usage_pct / 100.0
         self.trades: List[Position] = []
         self.equity_curve: List[dict] = []
         self.signal_log: List[dict] = []
+        self._open_margin = 0.0
 
     def _apply_slippage(self, price: float, side: str) -> float:
         if side == "BUY":
@@ -48,6 +56,18 @@ class BacktestEngine:
 
     def _commission(self, qty: int, price: float) -> float:
         return qty * price * self.commission_pct
+
+    def _entry_quantity(self, price: float, side: str = "BUY") -> int:
+        """Quantity sizing: cash-frac (spot) or whole-lot margin (futures)."""
+        if self.lot_size and self.lot_size > 0 and self.margin_pct > 0:
+            margin_per_lot = price * self.lot_size * self.margin_pct
+            if margin_per_lot <= 0:
+                return self.lot_size
+            alloc = self.cash * self.margin_usage_pct
+            max_lots = max(1, int(alloc / margin_per_lot))
+            return max_lots * self.lot_size
+        qty = max(1, int(self.cash * 0.95 / price))
+        return qty
 
     def run(
         self,
@@ -63,6 +83,7 @@ class BacktestEngine:
         self.equity_curve = []
         self.signal_log = []
         self.cash = self.initial_capital
+        self._open_margin = 0.0
 
         open_position: Optional[Position] = None
         df = df.iloc[skip_initial_n:] if len(df) > skip_initial_n + 5 else df
@@ -76,46 +97,76 @@ class BacktestEngine:
             if open_position is None:
                 if signal["action"] == "BUY" and signal.get("confidence", 0) >= 0.6:
                     buy_price = self._apply_slippage(price, "BUY")
-                    qty = max(1, int(self.cash * 0.95 / buy_price))
+                    qty = self._entry_quantity(buy_price, "BUY")
                     if qty > 0:
-                        cost = qty * buy_price + self._commission(qty, buy_price)
-                        if cost <= self.cash:
-                            self.cash -= cost
-                            open_position = Position(
-                                symbol=symbol,
-                                side="LONG",
-                                quantity=qty,
-                                entry_price=buy_price,
-                                entry_time=ts,
-                                entry_reason=signal.get("reason", ""),
-                            )
+                        if self.lot_size and self.lot_size > 0:
+                            margin = qty * buy_price * self.margin_pct
+                            cost = margin + self._commission(qty, buy_price)
+                            if cost <= self.cash:
+                                self.cash -= cost
+                                self._open_margin = margin
+                                open_position = Position(
+                                    symbol=symbol,
+                                    side="LONG",
+                                    quantity=qty,
+                                    entry_price=buy_price,
+                                    entry_time=ts,
+                                    entry_reason=signal.get("reason", ""),
+                                )
+                        else:
+                            cost = qty * buy_price + self._commission(qty, buy_price)
+                            if cost <= self.cash:
+                                self.cash -= cost
+                                open_position = Position(
+                                    symbol=symbol,
+                                    side="LONG",
+                                    quantity=qty,
+                                    entry_price=buy_price,
+                                    entry_time=ts,
+                                    entry_reason=signal.get("reason", ""),
+                                )
             else:
                 exit_signal = signal["action"] == "SELL"
                 if exit_signal or self._exit_rule(open_position, price, row):
                     sell_price = self._apply_slippage(price, "SELL")
-                    proceeds = open_position.quantity * sell_price
-                    self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+                    if self.lot_size and self.lot_size > 0:
+                        proceeds = open_position.quantity * sell_price
+                        pnl_notional = open_position.quantity * (sell_price - open_position.entry_price)
+                        self.cash += self._open_margin + pnl_notional - self._commission(open_position.quantity, sell_price)
+                        open_position.pnl = pnl_notional
+                    else:
+                        proceeds = open_position.quantity * sell_price
+                        self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+                        open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
                     open_position.exit_price = sell_price
                     open_position.exit_time = ts
-                    open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
                     open_position.exit_reason = signal.get("reason", "") if exit_signal else (row.get("exit_reason", "technical exit"))
                     self.trades.append(open_position)
                     open_position = None
+                    self._open_margin = 0.0
 
             equity = self.cash
             if open_position is not None:
-                equity += open_position.quantity * price
+                if self.lot_size and self.lot_size > 0:
+                    equity = self.cash + self._open_margin + open_position.quantity * (price - open_position.entry_price)
+                else:
+                    equity += open_position.quantity * price
             self.equity_curve.append({"timestamp": ts, "equity": equity, "price": price})
 
         # Force close any remaining position at last price
         if open_position is not None:
             last_price = float(df.iloc[-1]["close"])
             sell_price = self._apply_slippage(last_price, "SELL")
-            proceeds = open_position.quantity * sell_price
-            self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+            if self.lot_size and self.lot_size > 0:
+                pnl_notional = open_position.quantity * (sell_price - open_position.entry_price)
+                self.cash += self._open_margin + pnl_notional - self._commission(open_position.quantity, sell_price)
+                open_position.pnl = pnl_notional
+            else:
+                proceeds = open_position.quantity * sell_price
+                self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+                open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
             open_position.exit_price = sell_price
             open_position.exit_time = df.index[-1]
-            open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
             open_position.exit_reason = "end of backtest"
             self.trades.append(open_position)
 
@@ -203,9 +254,19 @@ def run_backtest(
     commission_pct: float = 0.03,
     slippage_pct: float = 0.05,
     skip_initial_n: int = 60,
+    lot_size: int = 0,
+    margin_pct: float = 12.0,
+    margin_usage_pct: float = 60.0,
 ) -> dict:
     """Convenience wrapper: computes indicators, runs backtest, returns results."""
     indicator_engine = IndicatorEngine(df)
     enriched = indicator_engine.compute_all()
-    engine = BacktestEngine(initial_capital, commission_pct, slippage_pct)
+    engine = BacktestEngine(
+        initial_capital,
+        commission_pct,
+        slippage_pct,
+        lot_size=lot_size,
+        margin_pct=margin_pct,
+        margin_usage_pct=margin_usage_pct,
+    )
     return engine.run(enriched, strategy, symbol, skip_initial_n=skip_initial_n)

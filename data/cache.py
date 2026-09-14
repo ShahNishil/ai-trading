@@ -75,6 +75,23 @@ class DataCache:
             """
         )
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """Add F&O metadata columns to existing databases (idempotent)."""
+        cur = self._conn.cursor()
+
+        def add_column(table: str, column: str, ddl: str):
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = [row[1] for row in cur.fetchall()]
+            if column not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+        add_column("orders", "exchange_segment", "TEXT")
+        add_column("orders", "instrument_type", "TEXT")
+        add_column("trades", "exchange_segment", "TEXT")
+        add_column("trades", "instrument_type", "TEXT")
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Candle caching
@@ -161,8 +178,9 @@ class DataCache:
             """
             INSERT OR REPLACE INTO orders
             (order_id, symbol, side, quantity, price, filled_price, status,
-             strategy, order_type, product_type, created_at, mode)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+             strategy, order_type, product_type, created_at, mode,
+             exchange_segment, instrument_type)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 order.get("order_id", ""),
@@ -177,6 +195,8 @@ class DataCache:
                 order.get("product_type", ""),
                 order.get("created_at", datetime.now().isoformat()),
                 order.get("mode", "paper"),
+                order.get("exchange_segment", "NSE_EQ"),
+                order.get("instrument_type", "EQUITY"),
             ),
         )
         self._conn.commit()
@@ -187,8 +207,9 @@ class DataCache:
             """
             INSERT OR REPLACE INTO trades
             (trade_id, symbol, side, quantity, entry_price, exit_price,
-             entry_time, exit_time, pnl, strategy, mode, entry_reason, exit_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+             entry_time, exit_time, pnl, strategy, mode, entry_reason, exit_reason,
+             exchange_segment, instrument_type)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 trade.get("trade_id", ""),
@@ -204,6 +225,8 @@ class DataCache:
                 trade.get("mode", "paper"),
                 trade.get("entry_reason", ""),
                 trade.get("exit_reason", ""),
+                trade.get("exchange_segment", "NSE_EQ"),
+                trade.get("instrument_type", "EQUITY"),
             ),
         )
         self._conn.commit()

@@ -40,6 +40,23 @@ backtest:
   slippage_pct: 0.05            # Slippage percentage
   default_strategy: "momentum"  # momentum | mean_reversion | breakout | ai
 
+# Derivatives (F&O) Settings
+# Real contract data & live execution require Dhan credentials in `.env`.
+# Option-strategy backtesting works with underlying spot data (e.g. ^NSEI via yfinance)
+# using Black-Scholes pricing, so it works even without Dhan.
+derivatives:
+  default_underlying: "NIFTY"   # NIFTY | BANKNIFTY | FINNIFTY | MIDCPNIFTY | any stock F&O symbol
+  market: "IDX"                 # IDX (index F&O) | STK (stock F&O)
+  default_strategy: "long_straddle"
+  iv_pct: 0.0                   # 0 = use realised vol from underlying data (annualised % otherwise)
+  risk_free_rate_pct: 7.0
+  entry_days_before_expiry: 5   # Enter option structures N days before expiry
+  risk_per_trade_pct: 0.75      # % of capital risked per option structure
+  max_lots_per_trade: 5
+  futures_margin_pct: 12.0      # Futures margin as % of notional
+  futures_margin_usage_pct: 60.0
+  product_type: "INTR"          # INTR | CNC | MTF (F&O order product type)
+
 # Watchlists
 watchlists:
   NIFTY50:

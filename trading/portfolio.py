@@ -30,6 +30,8 @@ class Portfolio:
         entry_price: float,
         strategy: str = "auto_ai",
         entry_reason: str = "",
+        exchange_segment: str = "NSE_EQ",
+        instrument_type: str = "EQUITY",
     ) -> str:
         trade_id = str(uuid.uuid4())[:12]
         self.cache.save_trade(
@@ -47,6 +49,8 @@ class Portfolio:
                 "mode": self.mode,
                 "entry_reason": entry_reason,
                 "exit_reason": "",
+                "exchange_segment": exchange_segment,
+                "instrument_type": instrument_type,
             }
         )
         return trade_id

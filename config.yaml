@@ -56,6 +56,13 @@ derivatives:
   futures_margin_pct: 12.0      # Futures margin as % of notional
   futures_margin_usage_pct: 60.0
   product_type: "INTR"          # INTR | CNC | MTF (F&O order product type)
+  auto_trade:                   # Autonomous F&O trading (toggled in the UI)
+    enabled: false
+    strategy: "regime_switch"   # regime_switch = trend+vol regime → structure/futures
+    mode: "options"             # options (structures) | futures | both
+    market: "IDX"               # IDX (index F&O) | STK (stock F&O)
+    underlyings: ["NIFTY", "BANKNIFTY"]
+    min_confidence: 0.6         # minimum regime confidence before an F&O entry
 
 # Watchlists
 watchlists:

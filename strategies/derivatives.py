@@ -233,6 +233,97 @@ class FuturesTrendStrategy(MomentumStrategy):
     }
 
 
+class RegimeSwitchStrategy(BaseStrategy):
+    """Trend + volatility regime strategy for autonomous F&O trading.
+
+    Unlike the pure structures above (which are entered on a fixed schedule),
+    this is a bar-based strategy: it watches the underlying spot series and
+    emits directional BUY/SELL/HOLD signals the auto-trader can translate
+    into an option structure or a futures position:
+
+    - Trending up   -> BUY  (bullish structure / futures long)
+    - Trending down -> SELL (bearish structure / futures short)
+    - Range-bound   -> HOLD (skip; avoids structure decay)
+
+    In a high-volatility regime the signal prefers a long straddle (direction
+    agnostic) because both legs thrive on large moves.
+    """
+
+    name = "regime_switch"
+    description = "Regime switch: ADX trend + EMA stack + volatility → option structure or futures"
+    market = "auto"
+    default_params = {
+        "adx_threshold": 20.0,        # ADX below this => range-bound (HOLD)
+        "high_vol_natr": 1.5,         # NATR % above this => high-volatility regime
+        "structure_bull": "bull_call_spread",
+        "structure_bear": "bear_put_spread",
+        "structure_high_vol": "long_straddle",
+        "min_confidence": 0.6,
+    }
+
+    def generate_signal(self, df: pd.DataFrame) -> dict:
+        if df is None or len(df) < 60:
+            return {"action": "HOLD", "confidence": 0.0, "reason": "Not enough data",
+                    "structure": "", "vol_regime": ""}
+        last = df.iloc[-1]
+        close = float(last.get("close", 0) or 0)
+        ema21 = last.get("ema21")
+        ema50 = last.get("ema50")
+        rsi = float(last.get("rsi", 50) or 50)
+        adx = last.get("adx")
+        natr = float(last.get("natr", 0) or 0)
+        macd_hist = last.get("macd_hist", 0)
+
+        if pd.isna(ema21) or pd.isna(ema50) or close <= 0:
+            return {"action": "HOLD", "confidence": 0.0, "reason": "Missing indicator columns",
+                    "structure": "", "vol_regime": ""}
+
+        high_vol = natr >= float(self.params.get("high_vol_natr", 1.5))
+        vol_regime = "high" if high_vol else "low"
+
+        adx = float(adx) if pd.notna(adx) else 0.0
+        threshold = float(self.params.get("adx_threshold", 20.0))
+        if adx < threshold:
+            return {
+                "action": "HOLD", "confidence": 0.45,
+                "reason": f"Range-bound (ADX {adx:.1f} < {threshold:.0f}) — {vol_regime} vol",
+                "structure": "iron_condor", "vol_regime": vol_regime,
+            }
+
+        uptrend = close > ema21 > ema50
+        downtrend = close < ema21 < ema50
+        macd_ok = pd.notna(macd_hist) and (float(macd_hist) > 0 if uptrend else float(macd_hist) < 0)
+
+        if not uptrend and not downtrend:
+            return {"action": "HOLD", "confidence": 0.4,
+                    "reason": f"Trending (ADX {adx:.1f}) but EMA stack flat",
+                    "structure": "", "vol_regime": vol_regime}
+
+        base = 0.7 if adx >= 30 else 0.6
+        confidence = min(0.95, base + (0.1 if macd_ok else 0.0))
+        rsi_ok = (rsi < 80) if uptrend else (rsi > 20)
+        if not rsi_ok:
+            confidence -= 0.05
+
+        action = "BUY" if uptrend else "SELL"
+        if high_vol:
+            structure = str(self.params.get("structure_high_vol", "long_straddle"))
+        else:
+            structure = str(self.params.get("structure_bull" if uptrend else "structure_bear", ""))
+        reason = (
+            f"{action} regime: ADX {adx:.1f}, close {'>' if uptrend else '<'} ema21 "
+            f"{'<' if uptrend else '>'} ema50, RSI {rsi:.1f}, {vol_regime} vol "
+            f"(NATR {natr:.2f}%)"
+        )
+        return {
+            "action": action,
+            "confidence": round(max(0.5, min(confidence, 1.0)), 3),
+            "reason": reason,
+            "structure": structure,
+            "vol_regime": vol_regime,
+        }
+
+
 # ----------------------------------------------------------------------
 # Registry
 # ----------------------------------------------------------------------
@@ -251,7 +342,11 @@ FUTURES_STRATEGIES: Dict[str, type] = {
     FuturesTrendStrategy.name: FuturesTrendStrategy,
 }
 
-ALL_DERIVATIVE_STRATEGIES: Dict[str, type] = {**OPTION_STRATEGIES, **FUTURES_STRATEGIES}
+AUTO_STRATEGIES: Dict[str, type] = {
+    RegimeSwitchStrategy.name: RegimeSwitchStrategy,
+}
+
+ALL_DERIVATIVE_STRATEGIES: Dict[str, type] = {**OPTION_STRATEGIES, **FUTURES_STRATEGIES, **AUTO_STRATEGIES}
 
 
 def list_derivative_strategies() -> List[dict]:

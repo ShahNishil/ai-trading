@@ -425,7 +425,8 @@ deactivate
 4. **Futures Backtest** — `futures_trend` (momentum on the futures/spot series) with whole-lot, margin-aware sizing (`margin_pct` of notional, `margin_usage_pct` cap).
 5. **Payoff Simulator** — builds the selected structure's legs, prices them with BS, and plots P&L at expiry with breakevens, max profit/loss.
 6. Built-in option structures: `long_straddle`, `long_strangle`, `bull_call_spread`, `bear_put_spread`, `iron_condor`. Futures: `futures_trend`.
-7. **Live F&O trading** — `place_order()` takes `exchange_segment` (e.g. `NSE_FNO`) + `instrument_type` (OPTIDX/OPTSTK/FUTIDX/FUTSTK); `enter_option_structure()`/`enter_futures_position()` in `TradingEngine` place multi-leg paper/live entries; risk sizing supports `option_lots_quantity` / `futures_margin_quantity`. Real contract history + live orders need Dhan credentials in `.env`.
+7. **Autonomous F&O trading** — the auto-trader (`agents/auto_trade_agent.py`, Feature 2 page) has a derivatives loop controlled by `derivatives.auto_trade` (`enabled`, `strategy`, `mode: options|futures|both`). `scan_derivatives_once()` runs the regime strategy on each configured underlying and enters/rolls/flips structures (option legs) or futures via the paper/live engine; `HOLD` or a reversed regime squares off open F&O positions. No LLM needed — deterministic and runs alongside the cash-equity loop.
+8. **Live F&O trading** — `place_order()` takes `exchange_segment` (e.g. `NSE_FNO`) + `instrument_type` (OPTIDX/OPTSTK/FUTIDX/FUTSTK); `enter_option_structure()`/`enter_futures_position()` in `TradingEngine` place multi-leg paper/live entries; risk sizing supports `option_lots_quantity` / `futures_margin_quantity`. Real contract history + live orders need Dhan credentials in `.env`.
 
 ---
 

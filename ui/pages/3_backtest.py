@@ -27,7 +27,14 @@ with st.sidebar:
     universe = StockUniverse(config)
     watchlist = universe.resolve(config.get("triggers", {}).get("watchlist", "NIFTY50"))
     symbol_map = {s["symbol"]: s for s in watchlist}
-    symbol = st.selectbox("Symbol", list(symbol_map.keys()))
+    symbol_choice = st.selectbox("Symbol", list(symbol_map.keys()))
+    any_symbol = st.text_input(
+        "…or type any NSE symbol",
+        value="",
+        placeholder="e.g. TATAPOWER, IRCTC",
+        help="Overrides the dropdown. Data comes from Yahoo (.NS added automatically) unless the symbol is in a watchlist with a Dhan security_id.",
+    ).strip().upper()
+    symbol = any_symbol or symbol_choice
     timeframe = st.selectbox(
         "Timeframe",
         ["daily", "60min", "15min", "5min"],

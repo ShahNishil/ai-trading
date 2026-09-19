@@ -33,6 +33,15 @@ with st.sidebar:
         index=0 if trigger_cfg.get("watchlist") in ("NIFTY50",) else 0,
         help="Choose predefined watchlist or custom symbols",
     )
+    custom_symbols = []
+    if watchlist_name == "CUSTOM":
+        custom_text = st.text_input(
+            "Symbols (comma-separated)",
+            value=", ".join(trigger_cfg.get("custom_symbols", []) or []),
+            placeholder="e.g. TATAPOWER, IRCTC, ZOMATO",
+            help="Any NSE symbol. Yahoo data adds .NS automatically; no security_id needed.",
+        )
+        custom_symbols = [t.strip().upper() for t in custom_text.split(",") if t.strip()]
     timeframe = st.selectbox(
         "Timeframe",
         options=["daily", "60min", "15min", "5min"],
@@ -51,14 +60,9 @@ with st.sidebar:
     if st.button("Clear cache & Re-scan", help="Clears local candle cache for fresh data"):
         try:
             # Clear candles for this watchlist
-            import pathlib, sqlite3
-            db = pathlib.Path("D:/ai-trading/data/market_cache.db")
-            if db.exists():
-                conn = sqlite3.connect(str(db))
-                conn.execute("DELETE FROM candles")
-                conn.commit()
-                conn.close()
-                st.success("Cache cleared — next scan will fetch fresh data")
+            runtime["cache"]._conn.execute("DELETE FROM candles")
+            runtime["cache"]._conn.commit()
+            st.success("Cache cleared — next scan will fetch fresh data")
         except Exception as e:
             st.error(str(e))
 
@@ -67,7 +71,7 @@ main_col, side_col = st.columns([3, 1])
 with side_col:
     st.markdown("### Active Watchlist")
     universe = StockUniverse(config)
-    symbols = universe.resolve(watchlist_name, [])
+    symbols = universe.resolve(watchlist_name, custom_symbols)
     st.caption(f"{len(symbols)} symbols — {'Dhan' if is_dhan else 'Yahoo .NS'} mode")
     for s in symbols:
         st.markdown(f"- {s['symbol']}")
@@ -79,7 +83,7 @@ if analyze_btn:
         st.error("Data fetcher not initialized. Check logs.")
     else:
         agent = TriggerAgent(runtime["ai_engine"], runtime["data_fetcher"], config)
-        symbols = universe.resolve(watchlist_name)
+        symbols = universe.resolve(watchlist_name, custom_symbols)
         # Update lookback in config for this run
         config["triggers"]["lookback_days"] = int(lookback_days)
         progress = st.progress(0, text="Starting scan...")

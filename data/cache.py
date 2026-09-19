@@ -66,6 +66,24 @@ class DataCache:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS signal_outcomes (
+                signal_id INTEGER PRIMARY KEY,
+                outcome TEXT,           -- WIN | LOSS | EXPIRED | UNRESOLVED
+                exit_price REAL,
+                realized_return_pct REAL,
+                bars_held INTEGER,
+                resolved_at TEXT,
+                FOREIGN KEY (signal_id) REFERENCES signals (id)
+            )
+            """
+        )
+        # Older databases predate the timeframe_hours column on signals.
+        try:
+            cur.execute("ALTER TABLE signals ADD COLUMN timeframe_hours REAL DEFAULT 48")
+        except Exception:
+            pass  # column already exists
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS backtests (
                 id TEXT PRIMARY KEY,
                 strategy TEXT, symbol TEXT, params TEXT,
@@ -208,14 +226,14 @@ class DataCache:
         )
         self._conn.commit()
 
-    def save_signal(self, signal: dict):
+    def save_signal(self, signal: dict) -> int:
         cur = self._conn.cursor()
         cur.execute(
             """
             INSERT INTO signals
             (symbol, action, confidence, entry_price, stop_loss, target,
-             reasoning, created_at, source)
-            VALUES (?,?,?,?,?,?,?,?,?)
+             reasoning, created_at, source, timeframe_hours)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 signal.get("symbol", ""),
@@ -225,11 +243,65 @@ class DataCache:
                 signal.get("stop_loss", 0),
                 signal.get("target", 0),
                 signal.get("reasoning", ""),
-                datetime.now().isoformat(),
+                signal.get("created_at") or datetime.now().isoformat(),
                 signal.get("source", "ai"),
+                signal.get("timeframe_hours", 48),
             ),
         )
         self._conn.commit()
+        return int(cur.lastrowid)
+
+    def get_unresolved_signals(self, limit: int = 500) -> list:
+        """Actionable signals that have no recorded outcome yet."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT s.* FROM signals s
+            LEFT JOIN signal_outcomes o ON o.signal_id = s.id
+            WHERE o.signal_id IS NULL AND s.action IN ('BUY','SELL')
+              AND s.entry_price > 0 AND s.stop_loss > 0 AND s.target > 0
+            ORDER BY s.id ASC LIMIT ?
+            """,
+            (limit,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def save_signal_outcome(self, outcome: dict):
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO signal_outcomes
+            (signal_id, outcome, exit_price, realized_return_pct, bars_held, resolved_at)
+            VALUES (?,?,?,?,?,?)
+            """,
+            (
+                outcome["signal_id"],
+                outcome.get("outcome", "UNRESOLVED"),
+                outcome.get("exit_price", 0),
+                outcome.get("realized_return_pct", 0),
+                outcome.get("bars_held", 0),
+                outcome.get("resolved_at") or datetime.now().isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def get_resolved_signals(self, limit: int = 5000) -> list:
+        """Signals joined with their outcomes, for calibration reporting."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT s.id, s.symbol, s.action, s.confidence, s.entry_price,
+                   s.stop_loss, s.target, s.source, s.created_at,
+                   o.outcome, o.exit_price, o.realized_return_pct, o.bars_held
+            FROM signals s JOIN signal_outcomes o ON o.signal_id = s.id
+            WHERE o.outcome IN ('WIN','LOSS','EXPIRED')
+            ORDER BY s.id DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def get_signals(self, limit: int = 100) -> list:
         cur = self._conn.cursor()

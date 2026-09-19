@@ -170,3 +170,71 @@ if ai_strat:
             )
         st.session_state["bt_result"] = result
         st.rerun()
+# ----------------------------------------------------------------------
+# Walk-forward validation: the honest version of "optimize"
+# ----------------------------------------------------------------------
+st.markdown("---")
+st.markdown("### 🚶 Walk-Forward Validation")
+st.caption(
+    "Optimizes on a rolling training window and evaluates on the unseen window "
+    "that follows. The out-of-sample row is the only number to trust; the gap "
+    "between in-sample and out-of-sample is the overfitting tax."
+)
+wf_c1, wf_c2, wf_c3 = st.columns(3)
+wf_train = wf_c1.number_input("Train bars", 120, 756, 252, 21)
+wf_test = wf_c2.number_input("Test bars", 21, 252, 63, 21)
+wf_grid_on = wf_c3.checkbox("Grid-search params per fold", value=True)
+
+if st.button("🏃 Run walk-forward", use_container_width=True):
+    if not runtime["data_fetcher"]:
+        st.error("No data source configured.")
+    else:
+        from backtest.walkforward import walk_forward
+
+        grids = {
+            "momentum": {"fast_ema": [9, 12], "slow_ema": [21, 26]},
+            "mean_reversion": {"oversold": [25, 30, 35], "overbought": [65, 70, 75]},
+            "breakout": {"donchian_length": [15, 20, 30]},
+        }
+        grid = grids.get(selected_strategy, {}) if wf_grid_on else {}
+        wf_df = runtime["data_fetcher"].fetch_daily(symbol, security_id, days=lookback_days)
+        if wf_df is None or wf_df.empty:
+            st.error("No data for symbol.")
+        else:
+            with st.spinner(f"Walk-forward on {symbol}: {selected_strategy}..."):
+                wf = walk_forward(
+                    selected_strategy, wf_df, grid,
+                    train_bars=int(wf_train), test_bars=int(wf_test),
+                    initial_capital=initial_capital,
+                    commission_pct=commission, slippage_pct=slippage,
+                    stop_loss_pct=bt_stop, target_pct=bt_target, trailing_stop_pct=bt_trail,
+                )
+            if wf.get("error"):
+                st.error(wf["error"])
+            else:
+                if wf.get("warning"):
+                    st.warning(wf["warning"])
+                o = wf["oos_metrics"]
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("OOS compounded return", f"{o['compounded_return_pct']}%")
+                m2.metric("OOS mean Sharpe", o["mean_sharpe"])
+                m3.metric("Overfit gap (IS − OOS)", f"{wf['overfit_gap_pct']}pp",
+                          help="In-sample mean return minus out-of-sample. Large positive = the grid fit noise.")
+                m4.metric("Param stability", f"{wf['param_stability']:.0%}",
+                          help="Share of folds choosing the same parameters. Low = the 'edge' keeps moving.")
+                st.caption(
+                    f"{wf['n_folds']} folds · {o['profitable_folds']} profitable · "
+                    f"worst fold {o['worst_fold_return_pct']}% · {o['num_trades']} OOS trades"
+                )
+                fold_rows = [
+                    {
+                        "test window": f"{f['test_start'][:10]} → {f['test_end'][:10]}",
+                        "params": str(f["chosen_params"]),
+                        "IS ret%": f["train_metrics"].get("total_return_pct", 0),
+                        "OOS ret%": f["test_metrics"].get("total_return_pct", 0),
+                        "OOS sharpe": f["test_metrics"].get("sharpe", 0),
+                        "OOS trades": f["test_metrics"].get("num_trades", 0),
+                    }
+                    for f in wf["folds"]
+                ]
+                st.dataframe(pd.DataFrame(fold_rows), use_container_width=True, hide_index=True)

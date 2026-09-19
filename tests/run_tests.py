@@ -16,6 +16,8 @@ MODULES = [
     "tests.test_portfolio",
     "tests.test_backtest_stops",
     "tests.test_auto_execute",
+    "tests.test_walkforward",
+    "tests.test_calibration",
 ]
 
 

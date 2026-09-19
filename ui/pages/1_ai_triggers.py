@@ -212,3 +212,40 @@ if results:
 
 else:
     st.info("Select settings and click **Analyze Watchlist** to get AI triggers. Tip: If you see no results, lower threshold to 0.40 or use Yahoo fallback mode (no Dhan needed).")
+
+# ----------------------------------------------------------------------
+# Confidence calibration: stated confidence vs what actually happened
+# ----------------------------------------------------------------------
+st.markdown("---")
+with st.expander("📏 Confidence calibration (stated vs realized)"):
+    st.caption(
+        "Every scan records its BUY/SELL signals. This resolves them against "
+        "later prices (did the target hit before the stop?) and checks whether "
+        "confidence 0.7 actually wins ~70% of the time."
+    )
+    if st.button("Resolve outcomes & report", key="calib_btn"):
+        from core.calibration import calibration_report, resolve_signals
+
+        watch = StockUniverse(config).resolve(watchlist_name if watchlist_name != "CUSTOM" else "NIFTY50")
+        with st.spinner("Resolving recorded signals against price history..."):
+            counts = resolve_signals(runtime["cache"], runtime["data_fetcher"], watch)
+        st.write(
+            f"Resolved this pass — WIN: {counts['WIN']}, LOSS: {counts['LOSS']}, "
+            f"EXPIRED: {counts['EXPIRED']}, still open: {counts['UNRESOLVED']}, no data: {counts['NO_DATA']}"
+        )
+        report = calibration_report(runtime["cache"])
+        if report.get("error"):
+            st.info(report["error"] + " — run a few scans first, outcomes need time to resolve.")
+        else:
+            import pandas as _pd
+
+            st.metric("Resolved signals", report["n"])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Overall win rate", f"{report['overall_win_rate']:.0%}")
+            c2.metric("Mean stated confidence", f"{report['mean_stated_confidence']:.0%}")
+            c3.metric("Brier score", report["brier_score"], help="0.25 = coin flip at 0.5 confidence; lower is better")
+            st.dataframe(_pd.DataFrame(report["buckets"]), use_container_width=True, hide_index=True)
+            if report["overconfident_buckets"]:
+                st.error(report["verdict"])
+            else:
+                st.success(report["verdict"])

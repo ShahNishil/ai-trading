@@ -177,6 +177,30 @@ class TriggerAgent:
             traceback.print_exc()
             return {"symbol": symbol, "action": "ERROR", "confidence": 0.0, "reasoning": str(e), "source": "error"}
 
+    def _record_signal(self, result: dict):
+        """Persist actionable signals so calibration can score them later.
+
+        Without this record there is nothing to compare stated confidence
+        against; the signals table existed but nothing ever wrote to it.
+        """
+        try:
+            if result.get("action") in ("BUY", "SELL") and result.get("entry_price"):
+                self.data.cache.save_signal(
+                    {
+                        "symbol": result.get("symbol", ""),
+                        "action": result["action"],
+                        "confidence": float(result.get("confidence", 0) or 0),
+                        "entry_price": float(result.get("entry_price", 0) or 0),
+                        "stop_loss": float(result.get("stop_loss", 0) or 0),
+                        "target": float(result.get("target", 0) or 0),
+                        "reasoning": str(result.get("reasoning", ""))[:500],
+                        "source": result.get("source", "ai"),
+                        "timeframe_hours": float(result.get("timeframe_hours", 48) or 48),
+                    }
+                )
+        except Exception:
+            pass  # recording must never break a scan
+
     def analyze_watchlist(self, watchlist: list, timeframe: str = "daily") -> list:
         """Analyze an entire watchlist and return all recommendations ranked by confidence."""
         results = []
@@ -189,6 +213,7 @@ class TriggerAgent:
             result = self.analyze_symbol(
                 symbol, security_id, item.get("exchange", "NSE_EQ"), timeframe
             )
+            self._record_signal(result)
             results.append(result)
         # Rank: BUY/SELL first by confidence, then HOLD by confidence
         def rank_key(r):

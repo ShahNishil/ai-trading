@@ -89,7 +89,13 @@ class BacktestRunner:
         return result
 
     def strategy_optimize(self, strategy_name: str, symbol: str, security_id: str, param_grid: dict, **kwargs) -> list:
-        """Simple grid-search optimization over param_grid."""
+        """Simple grid-search optimization over param_grid.
+
+        WARNING: this ranks parameters by IN-SAMPLE Sharpe on the whole
+        dataset -- overfitting by construction. For any decision that matters,
+        use backtest.walkforward.walk_forward, which selects parameters on a
+        training window and reports performance only on unseen data.
+        """
         results = []
         import itertools
 

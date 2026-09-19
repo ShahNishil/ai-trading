@@ -24,6 +24,10 @@ class TradingEngine:
         self.orders = OrderManager(self.cache, dhan=dhan, mode=self.mode)
         self.portfolio = Portfolio(self.cache, mode=self.mode)
         self.risk = RiskManager(config, portfolio=self.portfolio)
+        # Best price reached since entry, per trade_id. A trailing stop has to
+        # ratchet off the peak; recomputing it from the *current* price can never
+        # move the stop up. In-memory only, so it reseeds after a restart.
+        self._peak_price: dict = {}
 
     # ------------------------------------------------------------------
     # Capital / account
@@ -118,24 +122,78 @@ class TradingEngine:
             strategy="exit",
             security_id=security_id,
         )
+        if order.get("status") == "ERROR":
+            # Never mark a position closed in the book when the exit order was
+            # rejected - that silently desynchronises the book from the broker
+            # and leaves real exposure that the risk manager can no longer see.
+            return {"success": False, "error": order.get("error", "Exit order failed"), "order": order}
+
         result = self.portfolio.close_trade(trade_id, exit_price or order.get("filled_price") or 0, reason)
         if result is None:
             return {"success": False, "error": "Trade not found"}
+        self._peak_price.pop(trade_id, None)
         result["success"] = True
         result["order"] = order
         return result
 
-    def update_positions_with_prices(self, current_prices: dict):
-        """Apply trailing stops and targets based on current prices."""
+    def update_positions_with_prices(self, current_prices: dict) -> list:
+        """Apply trailing stops and targets based on current prices.
+
+        Three defects previously lived here:
+          1. the trailing stop was computed from the CURRENT price, so it never
+             ratcheted and behaved as a fixed stop at the initial level;
+          2. SHORT positions were skipped entirely - they had no stop and no target;
+          3. exits called ``portfolio.close_trade`` directly, updating the book
+             without ever sending an order, so in live mode the broker position
+             stayed open while the book showed it closed.
+        """
+        actions = []
         for pos in self.portfolio.get_open_positions():
-            symbol = pos["symbol"].upper()
+            symbol = str(pos.get("symbol", "")).upper()
             price = current_prices.get(symbol)
             if not price:
                 continue
+            price = float(price)
             entry = float(pos["entry_price"])
+            trade_id = pos["trade_id"]
             qty = int(pos["quantity"])
-            if pos.get("side", "BUY").upper() == "BUY":
-                if price <= self.risk.trailing_stop(entry, price):
-                    self.portfolio.close_trade(pos["trade_id"], price, "trailing_stop")
-                elif price >= self.risk.compute_target(entry):
-                    self.portfolio.close_trade(pos["trade_id"], price, "target_hit")
+            is_long = str(pos.get("side", "BUY")).upper() in ("BUY", "LONG")
+
+            # Ratchet the high-water mark in the favourable direction only.
+            peak = self._peak_price.get(trade_id)
+            if peak is None:
+                peak = entry
+            peak = max(peak, price) if is_long else min(peak, price)
+            self._peak_price[trade_id] = peak
+
+            stop = self.risk.trailing_stop(entry, peak, side="LONG" if is_long else "SHORT")
+            target = (
+                self.risk.compute_target(entry)
+                if is_long
+                else round(entry * (1 - self.risk.target_pct / 100.0), 2)
+            )
+
+            hit_stop = price <= stop if is_long else price >= stop
+            hit_target = price >= target if is_long else price <= target
+
+            # Stop takes precedence: if both are touched between two observed
+            # prices we cannot tell which came first, so assume the adverse one.
+            if hit_stop:
+                reason = "trailing_stop"
+            elif hit_target:
+                reason = "target_hit"
+            else:
+                continue
+
+            result = self.close_position(
+                trade_id=trade_id,
+                exit_price=price,
+                security_id=str(pos.get("security_id", "")),
+                side="SELL" if is_long else "BUY",
+                reason=reason,
+                quantity=qty,
+                symbol=symbol,
+            )
+            actions.append({"symbol": symbol, "trade_id": trade_id, "reason": reason,
+                            "price": price, "stop": stop, "target": target, "result": result})
+        return actions

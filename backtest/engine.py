@@ -21,7 +21,9 @@ class Position:
     exit_price: Optional[float] = None
     exit_time: Optional[pd.Timestamp] = None
     exit_reason: str = ""
-    pnl: float = 0.0
+    pnl: float = 0.0            # net of entry + exit commission
+    gross_pnl: float = 0.0      # before commission
+    commission: float = 0.0
 
 
 class BacktestEngine:
@@ -65,10 +67,16 @@ class BacktestEngine:
         self.cash = self.initial_capital
 
         open_position: Optional[Position] = None
-        df = df.iloc[skip_initial_n:] if len(df) > skip_initial_n + 5 else df
+        # Keep the FULL frame so the strategy retains its indicator warm-up, and
+        # advance the start index instead of trimming rows. Trimming and then
+        # slicing `df[: idx + skip_initial_n + 1]` fed the strategy a window whose
+        # last bar sat `skip_initial_n` bars in the FUTURE of the bar being traded.
+        start_idx = skip_initial_n if len(df) > skip_initial_n + 5 else 0
 
-        for idx, (ts, row) in enumerate(df.iterrows()):
-            window = df.iloc[: idx + skip_initial_n + 1] if len(df) > skip_initial_n else df.iloc[: idx + 1]
+        for idx in range(start_idx, len(df)):
+            ts = df.index[idx]
+            row = df.iloc[idx]
+            window = df.iloc[: idx + 1]  # causal: ends on the bar being traded
             signal = strategy.on_bar(window)
             price = float(row["close"])
             self.signal_log.append({"time": ts, "signal": signal["action"], "confidence": signal.get("confidence", 0)})
@@ -78,7 +86,8 @@ class BacktestEngine:
                     buy_price = self._apply_slippage(price, "BUY")
                     qty = max(1, int(self.cash * 0.95 / buy_price))
                     if qty > 0:
-                        cost = qty * buy_price + self._commission(qty, buy_price)
+                        entry_comm = self._commission(qty, buy_price)
+                        cost = qty * buy_price + entry_comm
                         if cost <= self.cash:
                             self.cash -= cost
                             open_position = Position(
@@ -88,16 +97,22 @@ class BacktestEngine:
                                 entry_price=buy_price,
                                 entry_time=ts,
                                 entry_reason=signal.get("reason", ""),
+                                commission=entry_comm,
                             )
             else:
                 exit_signal = signal["action"] == "SELL"
                 if exit_signal or self._exit_rule(open_position, price, row):
                     sell_price = self._apply_slippage(price, "SELL")
                     proceeds = open_position.quantity * sell_price
-                    self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+                    exit_comm = self._commission(open_position.quantity, sell_price)
+                    self.cash += proceeds - exit_comm
                     open_position.exit_price = sell_price
                     open_position.exit_time = ts
-                    open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
+                    open_position.gross_pnl = proceeds - open_position.quantity * open_position.entry_price
+                    open_position.commission += exit_comm
+                    # Net of costs. Reporting gross P&L here inflated win-rate,
+                    # profit-factor and expectancy for every trade.
+                    open_position.pnl = open_position.gross_pnl - open_position.commission
                     open_position.exit_reason = signal.get("reason", "") if exit_signal else (row.get("exit_reason", "technical exit"))
                     self.trades.append(open_position)
                     open_position = None
@@ -112,15 +127,19 @@ class BacktestEngine:
             last_price = float(df.iloc[-1]["close"])
             sell_price = self._apply_slippage(last_price, "SELL")
             proceeds = open_position.quantity * sell_price
-            self.cash += proceeds - self._commission(open_position.quantity, sell_price)
+            exit_comm = self._commission(open_position.quantity, sell_price)
+            self.cash += proceeds - exit_comm
             open_position.exit_price = sell_price
             open_position.exit_time = df.index[-1]
-            open_position.pnl = proceeds - open_position.quantity * open_position.entry_price
+            open_position.gross_pnl = proceeds - open_position.quantity * open_position.entry_price
+            open_position.commission += exit_comm
+            open_position.pnl = open_position.gross_pnl - open_position.commission
             open_position.exit_reason = "end of backtest"
             self.trades.append(open_position)
 
         equity_df = pd.DataFrame(self.equity_curve).set_index("timestamp")
-        metrics = compute_metrics(equity_df, self.trades, self.initial_capital, df)
+        traded = df.iloc[start_idx:]  # benchmark must span the traded period, not the warm-up
+        metrics = compute_metrics(equity_df, self.trades, self.initial_capital, traded)
         return {
             "trades": self.trades,
             "equity_curve": equity_df,
@@ -134,6 +153,28 @@ class BacktestEngine:
         return False
 
 
+def infer_periods_per_year(index) -> float:
+    """Bars per year implied by the index spacing.
+
+    Hardcoding 252 treats a 5-minute bar as a trading day, which inflates both
+    CAGR and the Sharpe annualisation by orders of magnitude on intraday data.
+    Falls back to 252 when the spacing cannot be determined.
+    """
+    try:
+        if index is None or len(index) < 3:
+            return 252.0
+        deltas = pd.Series(index[1:]) - pd.Series(index[:-1])
+        median = deltas.median()
+        seconds = median.total_seconds()
+        if not seconds or seconds <= 0:
+            return 252.0
+        if seconds >= 82800:                      # >= 23h -> daily or slower
+            return 252.0
+        return 252.0 * (6.25 * 3600.0 / seconds)  # ~6.25h NSE session
+    except Exception:
+        return 252.0
+
+
 def compute_metrics(equity_df: pd.DataFrame, trades: list, initial_capital: float, price_df: pd.DataFrame) -> dict:
     if equity_df is None or equity_df.empty:
         return {"error": "No equity data"}
@@ -142,7 +183,7 @@ def compute_metrics(equity_df: pd.DataFrame, trades: list, initial_capital: floa
     final_equity = float(equity.iloc[-1])
     ret = (final_equity / initial_capital) - 1
     n_periods = len(equity)
-    periods_per_year = 252
+    periods_per_year = infer_periods_per_year(equity.index)
     cagr = (final_equity / initial_capital) ** (periods_per_year / max(n_periods, 1)) - 1 if final_equity > 0 else -1
 
     daily_ret = equity.pct_change().dropna()
@@ -175,8 +216,15 @@ def compute_metrics(equity_df: pd.DataFrame, trades: list, initial_capital: floa
     else:
         bench_ret = 0.0
 
+    total_commission = sum(getattr(t, "commission", 0.0) for t in closed)
+    gross_total = sum(getattr(t, "gross_pnl", t.pnl) for t in closed)
+
     return {
         "initial_capital": initial_capital,
+        "periods_per_year": round(periods_per_year, 1),
+        "total_commission": round(total_commission, 2),
+        "gross_pnl": round(gross_total, 2),
+        "net_pnl": round(sum(t.pnl for t in closed), 2),
         "final_equity": round(final_equity, 2),
         "total_return_pct": round(ret * 100, 2),
         "buy_hold_return_pct": round(bench_ret * 100, 2),

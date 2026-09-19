@@ -71,40 +71,60 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
 
 
 def supertrend(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 10, multiplier: float = 3.0):
+    """Classic SuperTrend.
+
+    The bands must be seeded at the first bar where ATR is defined. Without that
+    seed every comparison against a NaN band evaluates False, the carry-forward
+    branch propagates NaN indefinitely, and the trend is pinned to +1 for the
+    whole series.
+    """
     mid = (high + low) / 2
     a = atr(high, low, close, length)
-    upper_basic = mid + multiplier * a
-    lower_basic = mid - multiplier * a
-    upper_band = pd.Series(np.nan, index=close.index)
-    lower_band = pd.Series(np.nan, index=close.index)
-    trend = pd.Series(1, index=close.index, dtype=int)
-    supertrend_line = pd.Series(np.nan, index=close.index)
+    upper_basic = (mid + multiplier * a).to_numpy(dtype=float)
+    lower_basic = (mid - multiplier * a).to_numpy(dtype=float)
+    c = close.to_numpy(dtype=float)
+    n = len(close)
 
-    for i in range(1, len(close)):
-        upper_band.iloc[i] = (
-            upper_basic.iloc[i]
-            if (upper_basic.iloc[i] < upper_band.iloc[i - 1]) or (close.iloc[i - 1] > upper_band.iloc[i - 1])
-            else upper_band.iloc[i - 1]
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    line = np.full(n, np.nan)
+    trend = np.ones(n, dtype=int)
+
+    valid = ~np.isnan(upper_basic) & ~np.isnan(lower_basic) & ~np.isnan(c)
+    if not valid.any():
+        return pd.Series(line, index=close.index), pd.Series(trend, index=close.index)
+
+    first = int(np.argmax(valid))
+    upper[first] = upper_basic[first]
+    lower[first] = lower_basic[first]
+    trend[first] = 1 if c[first] >= lower[first] else -1
+    line[first] = lower[first] if trend[first] == 1 else upper[first]
+
+    for i in range(first + 1, n):
+        if np.isnan(upper_basic[i]) or np.isnan(lower_basic[i]):
+            upper[i], lower[i] = upper[i - 1], lower[i - 1]
+            trend[i] = trend[i - 1]
+            line[i] = line[i - 1]
+            continue
+
+        upper[i] = (
+            upper_basic[i]
+            if (upper_basic[i] < upper[i - 1]) or (c[i - 1] > upper[i - 1])
+            else upper[i - 1]
         )
-        lower_band.iloc[i] = (
-            lower_basic.iloc[i]
-            if (lower_basic.iloc[i] > lower_band.iloc[i - 1]) or (close.iloc[i - 1] < lower_band.iloc[i - 1])
-            else lower_band.iloc[i - 1]
+        lower[i] = (
+            lower_basic[i]
+            if (lower_basic[i] > lower[i - 1]) or (c[i - 1] < lower[i - 1])
+            else lower[i - 1]
         )
-        if pd.isna(supertrend_line.iloc[i - 1]) and pd.isna(upper_band.iloc[i]):
-            trend.iloc[i] = 1
-        elif pd.isna(supertrend_line.iloc[i - 1]) and pd.isna(lower_band.iloc[i]):
-            trend.iloc[i] = -1
-        elif trend.iloc[i - 1] == 1 and close.iloc[i] < lower_band.iloc[i]:
-            trend.iloc[i] = -1
-        elif trend.iloc[i - 1] == -1 and close.iloc[i] > upper_band.iloc[i]:
-            trend.iloc[i] = 1
+
+        if trend[i - 1] == 1:
+            trend[i] = -1 if c[i] < lower[i] else 1
         else:
-            trend.iloc[i] = trend.iloc[i - 1]
-        supertrend_line.iloc[i] = (
-            lower_band.iloc[i] if trend.iloc[i] == 1 else upper_band.iloc[i]
-        )
-    return supertrend_line, trend
+            trend[i] = 1 if c[i] > upper[i] else -1
+        line[i] = lower[i] if trend[i] == 1 else upper[i]
+
+    return pd.Series(line, index=close.index), pd.Series(trend, index=close.index)
 
 
 def mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, length: int = 14) -> pd.Series:
@@ -204,8 +224,11 @@ class IndicatorEngine:
         df["atr"] = atr(h, l, c, 14)
         df["natr"] = df["atr"] / c.replace(0, np.nan) * 100
         df["kc_upper"], df["kc_middle"], df["kc_lower"] = self._keltner()
-        df["don_upper"] = h.rolling(20, min_periods=20).max()
-        df["don_lower"] = l.rolling(20, min_periods=20).min()
+        # Shifted by one bar: the channel is the PRIOR 20-bar extreme. Including the
+        # current bar makes "close breaks above the channel" unreachable, since
+        # close <= high <= rolling-max-of-high by construction.
+        df["don_upper"] = h.rolling(20, min_periods=20).max().shift(1)
+        df["don_lower"] = l.rolling(20, min_periods=20).min().shift(1)
 
         # --- Volume ---
         df["volume_sma20"] = sma(v, 20)

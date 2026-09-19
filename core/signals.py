@@ -17,11 +17,11 @@ class SignalGenerator:
             return 0
         last = self.df.iloc[-1]
         score = 0.0
+        # Directional oscillators only. ADX and -DI are handled separately below
+        # because neither is bullish-when-high.
         checks = [
             ("rsi", 55, 45),
-            ("adx", 25, 20),
             ("dmp", 24, 18),
-            ("dmn", 24, 18),
             ("macd_hist", 0.0, 0.0),
             ("stoch_k", 60, 40),
             ("mfi", 60, 40),
@@ -35,6 +35,22 @@ class SignalGenerator:
             elif val < sell_thresh:
                 score -= 1
 
+        # -DI is the BEARISH half of the DMI pair: a high reading argues for
+        # downside. Scoring it like +DI made strong downtrends read as bullish.
+        dmn = last.get("dmn")
+        if dmn is not None and pd.notna(dmn):
+            if dmn > 24:
+                score -= 1
+            elif dmn < 18:
+                score += 1
+
+        # ADX is trend STRENGTH and carries no direction - a reading of 40 is just
+        # as consistent with a hard downtrend as an uptrend. Previously ADX > 25
+        # added a bullish point outright. Use it only to damp conviction in chop.
+        adx_val = last.get("adx")
+        if adx_val is not None and pd.notna(adx_val) and adx_val < 20:
+            score *= 0.6
+
         # Trend alignment
         close, ema9, ema21, ema50, ema200 = (
             last.get("close"),
@@ -43,7 +59,7 @@ class SignalGenerator:
             last.get("ema50"),
             last.get("ema200"),
         )
-        if close and ema9 and ema21 and ema50:
+        if all(v is not None and pd.notna(v) for v in (close, ema9, ema21, ema50)):
             if close > ema9 > ema21 > ema50:
                 score += 2
             elif close < ema9 < ema21 < ema50:
@@ -51,7 +67,7 @@ class SignalGenerator:
 
         # Bollinger band position
         bb_upper, bb_lower, bb_middle = last.get("bb_upper"), last.get("bb_lower"), last.get("bb_middle")
-        if bb_upper and bb_lower and bb_middle and close:
+        if all(v is not None and pd.notna(v) for v in (bb_upper, bb_lower, bb_middle, close)):
             if close > bb_upper:
                 score += 1
             elif close < bb_lower:
@@ -78,9 +94,9 @@ class SignalGenerator:
                 score -= 1
 
         close, bb_lower, bb_upper = last.get("close"), last.get("bb_lower"), last.get("bb_upper")
-        if close and bb_lower and close < bb_lower:
+        if pd.notna(close) and pd.notna(bb_lower) and close < bb_lower:
             score += 2
-        if close and bb_upper and close > bb_upper:
+        if pd.notna(close) and pd.notna(bb_upper) and close > bb_upper:
             score -= 2
 
         stoch_k = last.get("stoch_k")
@@ -102,9 +118,9 @@ class SignalGenerator:
 
         don_upper, don_lower = last.get("don_upper"), last.get("don_lower")
         close = last.get("close")
-        if close and don_upper and close >= don_upper:
+        if pd.notna(close) and pd.notna(don_upper) and close >= don_upper:
             score += 3
-        elif close and don_lower and close <= don_lower:
+        elif pd.notna(close) and pd.notna(don_lower) and close <= don_lower:
             score -= 3
 
         sup = last.get("supertrend")
@@ -180,28 +196,73 @@ class SignalGenerator:
         }
 
     def ensemble_signal(self, df: pd.DataFrame) -> dict:
-        """Best of three signals by confidence."""
+        """Agreement-weighted vote across the three strategies.
+
+        Previously this returned whichever single strategy was most confident.
+        That is a max over three correlated views, so it reports the most extreme
+        draw rather than the consensus - it systematically overstates conviction,
+        and it would happily return BUY at 0.75 while another strategy was
+        simultaneously signalling SELL, with nothing in the output showing the
+        contradiction.
+        """
         all_s = self.get_all_signals(df)
         if not all_s:
             return {"action": "HOLD", "confidence": 0.0, "score": 0.0, "reason": "No data"}
-        # Prefer BUY/SELL over HOLD, then highest confidence
-        scored = sorted(
-            all_s.items(),
-            key=lambda kv: (kv[1]["action"] != "HOLD", kv[1]["confidence"]),
-            reverse=True,
-        )
-        best_name, best = scored[0]
-        best = dict(best)
-        best["strategy"] = best_name
-        best["all"] = all_s
-        return best
+
+        net = 0.0
+        for sig in all_s.values():
+            if sig["action"] == "BUY":
+                net += sig["confidence"]
+            elif sig["action"] == "SELL":
+                net -= sig["confidence"]
+
+        if abs(net) < 1e-9:
+            action = "HOLD"
+        else:
+            action = "BUY" if net > 0 else "SELL"
+
+        agreeing = [k for k, v in all_s.items() if v["action"] == action]
+        opposing = [k for k, v in all_s.items() if v["action"] not in (action, "HOLD")]
+
+        if action == "HOLD" or not agreeing:
+            conf = min((v["confidence"] for v in all_s.values()), default=0.0)
+            conf = round(float(np.clip(conf, 0.0, 0.5)), 3)
+            return {
+                "action": "HOLD",
+                "confidence": conf,
+                "score": 0.0,
+                "reason": "No directional consensus across strategies",
+                "strategy": "ensemble",
+                "agreement": f"0/{len(all_s)}",
+                "all": all_s,
+            }
+
+        # Mean confidence of the agreeing side, then penalised for contradiction.
+        conf = sum(all_s[k]["confidence"] for k in agreeing) / len(agreeing)
+        conf *= max(0.0, 1.0 - 0.3 * len(opposing))
+        conf = float(np.clip(conf, 0.0, 0.92))
+
+        lead = max(agreeing, key=lambda k: all_s[k]["confidence"])
+        reason = all_s[lead]["reason"]
+        if opposing:
+            reason += f" (contested by {', '.join(opposing)})"
+
+        return {
+            "action": action,
+            "confidence": round(conf, 3),
+            "score": round(float(net), 3),
+            "reason": reason,
+            "strategy": lead,
+            "agreement": f"{len(agreeing)}/{len(all_s)}",
+            "all": all_s,
+        }
 
     def _build_reason(self, action: str) -> str:
         last = self.df.iloc[-1]
         rsi = last.get("rsi")
         close, ema9, ema21 = last.get("close"), last.get("ema9"), last.get("ema21")
         parts = []
-        if close and ema9 and ema21:
+        if all(v is not None and pd.notna(v) for v in (close, ema9, ema21)):
             if close > ema9 > ema21:
                 parts.append("price above rising EMAs")
             elif close < ema9 < ema21:

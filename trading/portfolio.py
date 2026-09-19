@@ -51,13 +51,23 @@ class Portfolio:
         )
         return trade_id
 
+    @staticmethod
+    def _is_long(side) -> bool:
+        return str(side or "BUY").upper() in ("BUY", "LONG")
+
     def close_trade(self, trade_id: str, exit_price: float, exit_reason: str = "") -> dict:
         trades = self.cache.get_trades(limit=10000)
         for t in trades:
             if t["trade_id"] == trade_id:
                 qty = int(t["quantity"])
                 entry = float(t["entry_price"])
-                pnl = (exit_price - entry) * qty
+                # P&L must respect direction: a SHORT profits when price falls.
+                # The old formula booked shorts with the sign flipped, corrupting
+                # realized P&L, equity and the daily-loss guard.
+                if self._is_long(t.get("side")):
+                    pnl = (exit_price - entry) * qty
+                else:
+                    pnl = (entry - exit_price) * qty
                 cur = self.cache._conn.cursor()
                 cur.execute(
                     """
@@ -94,7 +104,12 @@ class Portfolio:
         total = 0.0
         for pos in self.get_open_positions():
             price = current_prices.get(pos["symbol"].upper()) or float(pos["entry_price"])
-            total += (price - float(pos["entry_price"])) * int(pos["quantity"])
+            entry = float(pos["entry_price"])
+            qty = int(pos["quantity"])
+            if self._is_long(pos.get("side")):
+                total += (price - entry) * qty
+            else:
+                total += (entry - price) * qty
         return round(total, 2)
 
     def equity(self, current_prices: dict = None) -> float:

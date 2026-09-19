@@ -49,6 +49,27 @@ class AutoTradeAgent:
             f"- Min confidence: {self.min_confidence}\n"
         )
 
+    def current_price(self, symbol: str, security_id: str, exchange: str = "NSE_EQ"):
+        """Best available real price: live quote, else last cached close.
+
+        Execution must never rely on a price the LLM wrote. The model is asked
+        for one, but it can return 0 or a stale/hallucinated number; an order
+        placed at 0 fills at 0 in paper mode and books an entry price of zero.
+        """
+        try:
+            ltp = self.data.fetch_quote(security_id, exchange)
+            if ltp:
+                return float(ltp)
+        except Exception:
+            pass
+        try:
+            df = self.data.fetch_daily(symbol, security_id, days=30, exchange=exchange)
+            if df is not None and not df.empty:
+                return float(df.iloc[-1]["close"])
+        except Exception:
+            pass
+        return None
+
     def evaluate_symbol(self, symbol: str, security_id: str, exchange: str = "NSE_EQ") -> dict:
         try:
             df = self.data.fetch_daily(symbol, security_id, days=200, exchange=exchange)
@@ -70,16 +91,30 @@ class AutoTradeAgent:
         security_id = (watchlist_item or {}).get("security_id", "")
         exchange = (watchlist_item or {}).get("exchange", "NSE_EQ")
         confidence = float(decision.get("confidence", 0) or 0)
-        price = float(decision.get("price", 0) or 0)
-        qty = int(decision.get("quantity", 0) or 0)
+        llm_price = float(decision.get("price", 0) or 0)
+        llm_qty = int(decision.get("quantity", 0) or 0)
         side = decision.get("side", "BUY").upper()
+
+        # Resolve the actual market price; the LLM's number is advisory at best.
+        price = self.current_price(symbol, security_id, exchange)
+        if price is None or price <= 0:
+            if d in ("ENTRY", "EXIT"):
+                return {"success": False, "reason": f"No market price available for {symbol}"}
+            price = 0.0
+        elif llm_price > 0 and abs(llm_price - price) / price > 0.05:
+            decision["price_note"] = (
+                f"LLM price {llm_price:.2f} deviated >5% from market {price:.2f}; used market"
+            )
 
         if d == "ENTRY":
             if confidence < self.min_confidence:
                 return {"success": False, "reason": f"Confidence {confidence:.2f} below min {self.min_confidence}"}
             capital = self.engine.get_capital()
-            if qty <= 0:
-                qty = self.engine.risk.position_quantity(capital, price or 100)
+            # Risk-based sizing from the real price. The LLM's quantity can only
+            # shrink the position, never exceed the risk budget.
+            qty = self.engine.risk.position_quantity(capital, price)
+            if llm_qty > 0:
+                qty = min(qty, llm_qty)
             if qty <= 0:
                 return {"success": False, "reason": "Invalid quantity"}
             return self.engine.enter_position(
@@ -109,8 +144,44 @@ class AutoTradeAgent:
     # ------------------------------------------------------------------
     # Continuous scanning loop
     # ------------------------------------------------------------------
+    def manage_open_positions(self, watchlist: list) -> list:
+        """Enforce stops/targets on open positions with fresh prices.
+
+        Without this call the stop machinery in TradingEngine never runs in
+        production: positions opened by the agent had no exit other than the
+        LLM later returning EXIT for that symbol.
+        """
+        positions = self.engine.portfolio.get_open_positions()
+        if not positions:
+            return []
+        by_symbol = {str(i.get("symbol", "")).upper(): i for i in watchlist}
+        prices, sec_ids = {}, {}
+        for pos in positions:
+            sym = str(pos.get("symbol", "")).upper()
+            item = by_symbol.get(sym, {})
+            px = self.current_price(sym, item.get("security_id", ""), item.get("exchange", "NSE_EQ"))
+            if px:
+                prices[sym] = px
+                if item.get("security_id"):
+                    sec_ids[sym] = item["security_id"]
+        if not prices:
+            return []
+        return self.engine.update_positions_with_prices(prices, security_ids=sec_ids)
+
     def scan_once(self, watchlist: list) -> list:
         results = []
+        # Risk exits come FIRST each cycle so a breached stop is acted on before
+        # any new capital is committed.
+        for action in self.manage_open_positions(watchlist):
+            results.append(
+                {
+                    "symbol": action.get("symbol", ""),
+                    "decision": "RISK_EXIT",
+                    "reason": action.get("reason", ""),
+                    "execution": action.get("result", {}),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
         for item in watchlist:
             symbol = item.get("symbol", "")
             security_id = item.get("security_id", "")

@@ -28,6 +28,9 @@ class BacktestRunner:
         initial_capital: float = 100000,
         commission_pct: float = 0.03,
         slippage_pct: float = 0.05,
+        stop_loss_pct: float = 0.0,
+        target_pct: float = 0.0,
+        trailing_stop_pct: float = 0.0,
     ) -> dict:
         strategy = create_strategy(strategy_name, params)
 
@@ -47,6 +50,9 @@ class BacktestRunner:
             initial_capital=initial_capital,
             commission_pct=commission_pct,
             slippage_pct=slippage_pct,
+            stop_loss_pct=stop_loss_pct,
+            target_pct=target_pct,
+            trailing_stop_pct=trailing_stop_pct,
         )
         result["symbol"] = symbol
         result["strategy"] = strategy_name

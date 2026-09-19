@@ -35,7 +35,27 @@ class TriggerAgent:
         }
         return json.dumps(blob, indent=2), full, ensemble
 
-    def _fill_prices(self, result: dict, close_price: float) -> dict:
+    @staticmethod
+    def _levels(close: float, atr, action: str) -> tuple:
+        """(stop_loss, target) sized to the stock's own volatility.
+
+        1.5x ATR stop / 2.5x ATR target when ATR is available; the old fixed
+        3%/4% otherwise. A fixed percentage is simultaneously too tight for a
+        volatile name (stopped out by noise) and too loose for a quiet one
+        (gives up more than the setup warrants).
+        """
+        use_atr = atr is not None and atr == atr and atr > 0 and atr < close * 0.2
+        if action == "BUY":
+            if use_atr:
+                return round(close - 1.5 * atr, 2), round(close + 2.5 * atr, 2)
+            return round(close * 0.97, 2), round(close * 1.04, 2)
+        if action == "SELL":
+            if use_atr:
+                return round(close + 1.5 * atr, 2), round(close - 2.5 * atr, 2)
+            return round(close * 1.03, 2), round(close * 0.96, 2)
+        return 0, 0
+
+    def _fill_prices(self, result: dict, close_price: float, atr=None) -> dict:
         """Ensure entry_price/stop_loss/target are populated from close if LLM omitted."""
         try:
             close = float(close_price) if close_price else 0
@@ -46,16 +66,12 @@ class TriggerAgent:
         action = result.get("action", "HOLD")
         if not result.get("entry_price"):
             result["entry_price"] = round(close, 2)
-        if action == "BUY":
+        stop, target = self._levels(close, atr, action)
+        if action in ("BUY", "SELL"):
             if not result.get("stop_loss"):
-                result["stop_loss"] = round(close * 0.97, 2)
+                result["stop_loss"] = stop
             if not result.get("target"):
-                result["target"] = round(close * 1.04, 2)
-        elif action == "SELL":
-            if not result.get("stop_loss"):
-                result["stop_loss"] = round(close * 1.03, 2)
-            if not result.get("target"):
-                result["target"] = round(close * 0.96, 2)
+                result["target"] = target
         else:  # HOLD
             result.setdefault("stop_loss", 0)
             result.setdefault("target", 0)
@@ -87,6 +103,7 @@ class TriggerAgent:
 
             data_blob, full, technical = self.build_data_blob(symbol, df)
             close_price = float(full.iloc[-1]["close"]) if "close" in full.columns else 0
+            last_atr = float(full.iloc[-1]["atr"]) if "atr" in full.columns else None
 
             # Try LLM
             llm_result = self.ai.analyze_indicators(TRIGGER_AGENT_SYSTEM_PROMPT, data_blob)
@@ -101,7 +118,7 @@ class TriggerAgent:
                     llm_result["confidence"] = float(llm_result.get("confidence", 0) or 0)
                 except Exception:
                     llm_result["confidence"] = 0.0
-                llm_result = self._fill_prices(llm_result, close_price)
+                llm_result = self._fill_prices(llm_result, close_price, atr=last_atr)
                 llm_result["source"] = "ai"
             else:
                 llm_result = None
@@ -116,13 +133,14 @@ class TriggerAgent:
                 # If LLM is HOLD with low confidence but technical is BUY/SELL with good confidence, use technical
                 if llm_result["action"] == "HOLD" and tech_action in ("BUY", "SELL") and tech_conf >= 0.55 and llm_conf < 0.60:
                     # Blend: use technical action but keep LLM reasoning if present
+                    t_stop, t_target = self._levels(close_price, last_atr, tech_action)
                     result = {
                         "symbol": symbol,
                         "action": tech_action,
                         "confidence": round(tech_conf, 3),
                         "entry_price": round(close_price, 2),
-                        "stop_loss": round(close_price * 0.97, 2) if tech_action == "BUY" else round(close_price * 1.03, 2),
-                        "target": round(close_price * 1.04, 2) if tech_action == "BUY" else round(close_price * 0.96, 2),
+                        "stop_loss": t_stop,
+                        "target": t_target,
                         "timeframe_hours": 48,
                         "reasoning": technical.get("reason", "") + f" (Technical {technical.get('strategy','')})",
                         "source": "technical",
@@ -135,13 +153,14 @@ class TriggerAgent:
                 return llm_result
             else:
                 # LLM failed — pure technical fallback
+                f_stop, f_target = self._levels(close_price, last_atr, tech_action)
                 result = {
                     "symbol": symbol,
                     "action": tech_action,
                     "confidence": round(tech_conf, 3),
                     "entry_price": round(close_price, 2),
-                    "stop_loss": round(close_price * 0.97, 2) if tech_action == "BUY" else round(close_price * 1.03, 2) if tech_action == "SELL" else 0,
-                    "target": round(close_price * 1.04, 2) if tech_action == "BUY" else round(close_price * 0.96, 2) if tech_action == "SELL" else 0,
+                    "stop_loss": f_stop,
+                    "target": f_target,
                     "timeframe_hours": 48,
                     "reasoning": technical.get("reason", "") + f" (Technical fallback — LLM unavailable: {has_llm_error})",
                     "source": "technical",

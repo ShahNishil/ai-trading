@@ -39,6 +39,13 @@ with st.sidebar:
     commission = st.slider("Commission %", 0.0, 0.5, float(bt_cfg.get("commission_pct", 0.03)), 0.01)
     slippage = st.slider("Slippage %", 0.0, 1.0, float(bt_cfg.get("slippage_pct", 0.05)), 0.05)
 
+    st.markdown("### Risk exits")
+    st.caption("Mirror the live auto-trader's exits so the backtest tests what actually runs. 0 disables.")
+    at_cfg = config.get("auto_trade", {})
+    bt_stop = st.slider("Stop-loss %", 0.0, 10.0, float(at_cfg.get("stop_loss_pct", 2.0)), 0.5)
+    bt_target = st.slider("Target %", 0.0, 20.0, float(at_cfg.get("target_pct", 4.0)), 0.5)
+    bt_trail = st.slider("Trailing stop %", 0.0, 10.0, float(at_cfg.get("trailing_stop_pct", 1.5)), 0.5)
+
     st.markdown("### Strategy")
     strategies = list_strategies()
     strat_names = [s["name"] for s in strategies]
@@ -84,6 +91,9 @@ else:
                 initial_capital=initial_capital,
                 commission_pct=commission,
                 slippage_pct=slippage,
+                stop_loss_pct=bt_stop,
+                target_pct=bt_target,
+                trailing_stop_pct=bt_trail,
             )
         if "error" in result:
             st.error(result["error"])
@@ -154,6 +164,9 @@ if ai_strat:
                 initial_capital=initial_capital,
                 commission_pct=commission,
                 slippage_pct=slippage,
+                stop_loss_pct=bt_stop,
+                target_pct=bt_target,
+                trailing_stop_pct=bt_trail,
             )
         st.session_state["bt_result"] = result
         st.rerun()

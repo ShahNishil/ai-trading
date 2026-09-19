@@ -9,7 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-MODULES = ["tests.test_no_lookahead", "tests.test_trailing_stop", "tests.test_indicators"]
+MODULES = [
+    "tests.test_no_lookahead",
+    "tests.test_trailing_stop",
+    "tests.test_indicators",
+    "tests.test_portfolio",
+    "tests.test_backtest_stops",
+    "tests.test_auto_execute",
+]
 
 
 def main() -> int:

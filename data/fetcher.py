@@ -66,10 +66,13 @@ class DataFetcher:
 
         try:
             ticker = yf.Ticker(yahoo_symbol)
-            df = ticker.history(period=period, interval=yf_interval, auto_adjust=False)
+            # auto_adjust=True: split/bonus-adjusted history. Unadjusted series
+            # put a fake cliff through every indicator at each corporate action
+            # (a 1:1 bonus looks like a 50% crash to RSI/MACD/ATR).
+            df = ticker.history(period=period, interval=yf_interval, auto_adjust=True)
             if df is None or df.empty:
                 # Try with period max for daily
-                df = yf.download(yahoo_symbol, period=period, interval=yf_interval, progress=False, auto_adjust=False)
+                df = yf.download(yahoo_symbol, period=period, interval=yf_interval, progress=False, auto_adjust=True)
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
             if df is None or df.empty:
@@ -126,9 +129,11 @@ class DataFetcher:
             if pd.isna(last_ts):
                 return False
             age_days = (datetime.now() - last_ts.to_pydatetime()).days if hasattr(last_ts, 'to_pydatetime') else 10
-            if timeframe == "daily" and age_days > 7:
+            # A daily-scan decision made on week-old candles is a decision about
+            # a different market. 4 days tolerates a long weekend, nothing more.
+            if timeframe == "daily" and age_days > 4:
                 return False
-            if timeframe != "daily" and age_days > 2:
+            if timeframe != "daily" and age_days > 1:
                 return False
             return True
         except Exception:

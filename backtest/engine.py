@@ -34,11 +34,21 @@ class BacktestEngine:
         initial_capital: float = 100000,
         commission_pct: float = 0.03,
         slippage_pct: float = 0.05,
+        stop_loss_pct: float = 0.0,
+        target_pct: float = 0.0,
+        trailing_stop_pct: float = 0.0,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.commission_pct = commission_pct / 100.0
         self.slippage_pct = slippage_pct / 100.0
+        # Risk exits, in percent (0 disables). These mirror the live engine's
+        # RiskManager so a backtest exercises the same exit rules the auto
+        # trader applies in production; without them the backtest holds losers
+        # until a reverse signal while live trading cuts them at the stop.
+        self.stop_loss_pct = stop_loss_pct / 100.0
+        self.target_pct = target_pct / 100.0
+        self.trailing_stop_pct = trailing_stop_pct / 100.0
         self.trades: List[Position] = []
         self.equity_curve: List[dict] = []
         self.signal_log: List[dict] = []
@@ -67,6 +77,7 @@ class BacktestEngine:
         self.cash = self.initial_capital
 
         open_position: Optional[Position] = None
+        peak = 0.0  # high-water mark of the open position, for the trailing stop
         # Keep the FULL frame so the strategy retains its indicator warm-up, and
         # advance the start index instead of trimming rows. Trimming and then
         # slicing `df[: idx + skip_initial_n + 1]` fed the strategy a window whose
@@ -80,6 +91,29 @@ class BacktestEngine:
             signal = strategy.on_bar(window)
             price = float(row["close"])
             self.signal_log.append({"time": ts, "signal": signal["action"], "confidence": signal.get("confidence", 0)})
+
+            if open_position is not None:
+                # Exit checks use the peak up to the PREVIOUS bar. Trailing off the
+                # current bar's own high before testing its low assumes the high
+                # printed first, which is unknowable; the conservative order is
+                # check-then-ratchet.
+                exit_price_level, exit_reason = self._risk_exit_level(
+                    open_position.entry_price, peak, float(row["low"]), float(row["high"])
+                )
+                peak = max(peak, float(row["high"]))
+                if exit_price_level is not None:
+                    sell_price = self._apply_slippage(exit_price_level, "SELL")
+                    proceeds = open_position.quantity * sell_price
+                    exit_comm = self._commission(open_position.quantity, sell_price)
+                    self.cash += proceeds - exit_comm
+                    open_position.exit_price = sell_price
+                    open_position.exit_time = ts
+                    open_position.gross_pnl = proceeds - open_position.quantity * open_position.entry_price
+                    open_position.commission += exit_comm
+                    open_position.pnl = open_position.gross_pnl - open_position.commission
+                    open_position.exit_reason = exit_reason
+                    self.trades.append(open_position)
+                    open_position = None
 
             if open_position is None:
                 if signal["action"] == "BUY" and signal.get("confidence", 0) >= 0.6:
@@ -99,9 +133,10 @@ class BacktestEngine:
                                 entry_reason=signal.get("reason", ""),
                                 commission=entry_comm,
                             )
+                            peak = buy_price
             else:
                 exit_signal = signal["action"] == "SELL"
-                if exit_signal or self._exit_rule(open_position, price, row):
+                if exit_signal:
                     sell_price = self._apply_slippage(price, "SELL")
                     proceeds = open_position.quantity * sell_price
                     exit_comm = self._commission(open_position.quantity, sell_price)
@@ -148,9 +183,36 @@ class BacktestEngine:
             "signal_log": self.signal_log,
         }
 
-    @staticmethod
-    def _exit_rule(position: Position, price: float, row: pd.Series) -> bool:
-        return False
+    def _risk_exit_level(self, entry: float, peak: float, bar_low: float, bar_high: float):
+        """Return (exit_price, reason) if the bar touches a stop or target, else (None, None).
+
+        Uses the bar's LOW/HIGH, not the close: a stop pierced intrabar fills
+        intrabar. When a single bar spans both the stop and the target we cannot
+        know which traded first, so the adverse fill is assumed (stop-first).
+        Exits fill AT the level, matching how a resting stop/limit order fills,
+        rather than at the more favourable close.
+        """
+        stop_level = None
+        if self.stop_loss_pct > 0:
+            stop_level = entry * (1 - self.stop_loss_pct)
+        if self.trailing_stop_pct > 0 and peak > 0:
+            trail = peak * (1 - self.trailing_stop_pct)
+            stop_level = trail if stop_level is None else max(stop_level, trail)
+
+        target_level = entry * (1 + self.target_pct) if self.target_pct > 0 else None
+
+        hit_stop = stop_level is not None and bar_low <= stop_level
+        hit_target = target_level is not None and bar_high >= target_level
+
+        if hit_stop:  # stop-first when both are touched
+            reason = "trailing_stop" if (
+                self.trailing_stop_pct > 0 and peak > 0
+                and stop_level > entry * (1 - self.stop_loss_pct if self.stop_loss_pct > 0 else 1)
+            ) else "stop_loss"
+            return stop_level, reason
+        if hit_target:
+            return target_level, "target_hit"
+        return None, None
 
 
 def infer_periods_per_year(index) -> float:
@@ -251,9 +313,15 @@ def run_backtest(
     commission_pct: float = 0.03,
     slippage_pct: float = 0.05,
     skip_initial_n: int = 60,
+    stop_loss_pct: float = 0.0,
+    target_pct: float = 0.0,
+    trailing_stop_pct: float = 0.0,
 ) -> dict:
     """Convenience wrapper: computes indicators, runs backtest, returns results."""
     indicator_engine = IndicatorEngine(df)
     enriched = indicator_engine.compute_all()
-    engine = BacktestEngine(initial_capital, commission_pct, slippage_pct)
+    engine = BacktestEngine(
+        initial_capital, commission_pct, slippage_pct,
+        stop_loss_pct=stop_loss_pct, target_pct=target_pct, trailing_stop_pct=trailing_stop_pct,
+    )
     return engine.run(enriched, strategy, symbol, skip_initial_n=skip_initial_n)

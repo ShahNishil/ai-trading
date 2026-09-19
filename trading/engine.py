@@ -136,7 +136,7 @@ class TradingEngine:
         result["order"] = order
         return result
 
-    def update_positions_with_prices(self, current_prices: dict) -> list:
+    def update_positions_with_prices(self, current_prices: dict, security_ids: dict = None) -> list:
         """Apply trailing stops and targets based on current prices.
 
         Three defects previously lived here:
@@ -148,6 +148,7 @@ class TradingEngine:
              stayed open while the book showed it closed.
         """
         actions = []
+        security_ids = security_ids or {}
         for pos in self.portfolio.get_open_positions():
             symbol = str(pos.get("symbol", "")).upper()
             price = current_prices.get(symbol)
@@ -185,10 +186,13 @@ class TradingEngine:
             else:
                 continue
 
+            # The trades table stores no security_id, so the caller must supply
+            # it (from the watchlist) or a live exit would silently skip the
+            # broker call and fill only on paper.
             result = self.close_position(
                 trade_id=trade_id,
                 exit_price=price,
-                security_id=str(pos.get("security_id", "")),
+                security_id=str(security_ids.get(symbol) or pos.get("security_id", "")),
                 side="SELL" if is_long else "BUY",
                 reason=reason,
                 quantity=qty,
